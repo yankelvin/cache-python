@@ -43,7 +43,7 @@ def read_from_redis(redis_conn, key):
 def write_to_redis(redis_conn, key, data, ttl):
     serialized_data = json.dumps(data, default=default_serializer)
     redis_conn.setex(key, ttl, serialized_data)
-    
+
 def hashable_key(args, kwargs):
     new_args = tuple(
         arg.to_json(orient='split') if isinstance(arg, pd.DataFrame) else arg
@@ -55,7 +55,7 @@ def hashable_key(args, kwargs):
     }
     return new_args, frozenset(new_kwargs.items())
 
-def custom_cache(host='localhost', port=6379, db=0, ttl=600):
+def custom_cache(host='localhost', port=6379, db=0, ttl=600, acquire_lock=True):
     use_redis = os.environ["COMPUTER"] == "AWS"
     
     if use_redis:
@@ -65,24 +65,22 @@ def custom_cache(host='localhost', port=6379, db=0, ttl=600):
             def wrapper(*args, **kwargs):
                 key = f"{func.__name__}-{json.dumps(args, default=default_serializer)}-{json.dumps(kwargs, default=default_serializer)}"
                 lock_key = f"{key}-lock"
-                result = None
                 
                 for attempt in range(3):
-                    if acquire_lock_redis(redis_conn, lock_key, ttl):
-                        try:
+                    if acquire_lock:
+                        if acquire_lock_redis(redis_conn, lock_key, ttl):
                             result = read_from_redis(redis_conn, key)
-                            if result is not None:
-                                break
-                            
-                            result = func(*args, **kwargs)
-                            write_to_redis(redis_conn, key, result, ttl)
-                        except Exception as ex:
-                            print(ex)
-                            raise ex
-                        finally:
+                            if result is None:
+                                result = func(*args, **kwargs)
+                                write_to_redis(redis_conn, key, result, ttl)
                             release_lock_redis(redis_conn, lock_key)
                             break
-                        
+                    else:
+                        result = read_from_redis(redis_conn, key)
+                        if result is None:
+                            result = func(*args, **kwargs)
+                            write_to_redis(redis_conn, key, result, ttl)
+                            break
                     time.sleep(2 * attempt)
                 
                 return result
